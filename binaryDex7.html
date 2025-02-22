@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width,initial-scale=1.0"
+  />
+  <title>Binary Bet DEX</title>
+
+  <!-- Bootstrap CSS -->
+  <link
+    rel="stylesheet"
+    href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"
+  />
+
+  <!-- TradingView Widget Script -->
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+
+  <!-- Ethers.js: Using jsDelivr CDN for v5.0 UMD -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.0.32/dist/ethers.umd.min.js"></script>
+
+  <style>
+    body {
+      background-color: #f8f9fa;
+    }
+    .container {
+      max-width: 1200px;
+      margin-top: 20px;
+    }
+    .nav-tabs .nav-link {
+      font-weight: 500;
+    }
+    .tab-content {
+      padding: 20px;
+      background-color: white;
+      border: 1px solid #dee2e6;
+      border-top: none;
+      border-radius: 0 0 5px 5px;
+    }
+    .alert-danger {
+      margin-bottom: 20px;
+    }
+    .tradingview-widget-container {
+      margin-bottom: 20px;
+    }
+    #profitDisplay {
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    #currentPosition,
+    #balanceDisplay {
+      margin-top: 20px;
+      padding: 15px;
+      background-color: #f1f3f5;
+      border-radius: 5px;
+    }
+    .row.align-items-stretch > [class^="col-"] > .card {
+      height: 100%;
+    }
+    .default {
+      color: #6c757d;
+    }
+    .checkmark {
+      color: green;
+      font-weight: bold;
+      margin-left: 8px;
+    }
+    #debugLog {
+      width: 100%;
+      height: 120px;
+      font-size: 0.85rem;
+      resize: vertical;
+      margin-top: 10px;
+      color: #495057;
+    }
+    /* Minimal addition to place the ETH balance at the top right */
+    #topBalanceDisplay {
+      float: right;
+      margin-top: -16px; /* adjust as desired */
+      font-size: 0.95rem;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="text-center my-4">Binary Bet DEX</h1>
+    <div id="topBalanceDisplay">
+      Arbitrum Balance: <span id="pubkeyBalance">0.0000</span> ETH
+    </div>
+    <ul class="nav nav-tabs" id="myTab" role="tablist">
+      <li class="nav-item">
+        <a
+          class="nav-link active"
+          id="settings-tab"
+          data-toggle="tab"
+          href="#settings"
+          role="tab"
+          aria-controls="settings"
+          aria-selected="true"
+        >
+          Settings
+        </a>
+      </li>
+      <li class="nav-item">
+        <a
+          class="nav-link"
+          id="trading-tab"
+          data-toggle="tab"
+          href="#trading"
+          role="tab"
+          aria-controls="trading"
+          aria-selected="false"
+        >
+          Trading
+        </a>
+      </li>
+      <li class="nav-item">
+        <a
+          class="nav-link"
+          id="pool-tab"
+          data-toggle="tab"
+          href="#pool"
+          role="tab"
+          aria-controls="pool"
+          aria-selected="false"
+        >
+          Pool
+        </a>
+      </li>
+    </ul>
+
+    <div class="tab-content" id="myTabContent">
+      <!-- SETTINGS TAB -->
+      <div
+        class="tab-pane fade show active"
+        id="settings"
+        role="tabpanel"
+        aria-labelledby="settings-tab"
+      >
+        <h2>General Settings</h2>
+        <div class="alert alert-danger" role="alert">
+          <strong>Warning:</strong> Storing private keys in local storage is
+          highly insecure. Anyone with access to your computer can steal your
+          funds. Use this only for testing with small amounts.
+        </div>
+        <form>
+          <div class="form-group">
+            <label for="privateKey">
+              Private Key
+              <!-- Tiny buttons for pubkey copy and exporting the priv key -->
+              <button
+                type="button"
+                id="copyPubKeyBtn"
+                class="btn btn-sm btn-outline-secondary"
+                style="margin-left: 8px;"
+              >
+                Copy pubkey
+              </button>
+              <button
+                type="button"
+                id="exportPrivKeyBtn"
+                class="btn btn-sm btn-outline-secondary"
+              >
+                Export
+              </button>
+            </label>
+            <input
+              type="password"
+              class="form-control"
+              id="privateKey"
+              placeholder="Enter your private key"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="rpcEndpoint">RPC Endpoint</label>
+            <input
+              type="text"
+              class="form-control"
+              id="rpcEndpoint"
+              placeholder="https://arb1.arbitrum.io/rpc"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="contractAddress">Contract Address</label>
+            <input
+              type="text"
+              class="form-control"
+              id="contractAddress"
+              placeholder="0x83b8722b4FBc1c40404aaC54c709F8B324e45752"
+            />
+          </div>
+
+          <hr />
+          <h4>Confirmation Settings</h4>
+          <div class="form-check mb-2">
+            <input
+              class="form-check-input"
+              type="checkbox"
+              id="disableConfirmationTrades"
+            />
+            <label
+              class="form-check-label"
+              for="disableConfirmationTrades"
+            >
+              Disable confirmation for trades
+            </label>
+          </div>
+          <div class="form-check mb-2">
+            <input
+              class="form-check-input"
+              type="checkbox"
+              id="disableConfirmationPool"
+            />
+            <label
+              class="form-check-label"
+              for="disableConfirmationPool"
+            >
+              Disable confirmation for pool actions
+            </label>
+          </div>
+          <hr />
+
+          <h4>Default Fees</h4>
+          <div class="form-group">
+            <label for="globalSettlerReward"
+              >Settler Reward (ETH)</label
+            >
+            <input
+              type="number"
+              class="form-control"
+              id="globalSettlerReward"
+              step="0.00000001"
+              min="0"
+            />
+          </div>
+          <div class="form-group">
+            <label for="oracleFeeSetting">Oracle Fees (ETH)</label>
+            <input
+              type="number"
+              class="form-control"
+              id="oracleFeeSetting"
+              step="0.00000001"
+              min="0"
+            />
+          </div>
+          <button type="button" class="btn btn-primary" id="saveSettings">
+            Save Settings
+          </button>
+          <span id="settingsCheck" class="checkmark" style="display:none;"
+            >✔</span
+          >
+
+          <hr />
+          <h4>Send ETH</h4>
+          <div class="form-group">
+            <label for="recipientAddress">Recipient Address</label>
+            <input
+              type="text"
+              class="form-control"
+              id="recipientAddress"
+              placeholder="0x..."
+            />
+          </div>
+          <div class="form-group">
+            <label for="sendAmount">Amount (ETH)</label>
+            <input
+              type="number"
+              class="form-control"
+              id="sendAmount"
+              step="0.00000001"
+              min="0"
+            />
+          </div>
+          <button type="button" class="btn btn-secondary" id="sendEthButton">
+            Send
+          </button>
+
+          <h5 class="mt-4">Debug Log:</h5>
+          <textarea id="debugLog" readonly></textarea>
+        </form>
+      </div>
+
+      <!-- TRADING TAB -->
+      <div
+        class="tab-pane fade"
+        id="trading"
+        role="tabpanel"
+        aria-labelledby="trading-tab"
+      >
+        <h2>Trading</h2>
+        <div class="row">
+          <div class="col-md-8">
+            <!-- TradingView Widget Container -->
+            <div class="tradingview-widget-container">
+              <div id="tradingview_chart"></div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <h3>Open Position</h3>
+            <form id="openPositionForm">
+              <div class="form-group">
+                <label>Direction</label>
+                <div class="form-check">
+                  <input
+                    class="form-check-input"
+                    type="radio"
+                    name="direction"
+                    id="long"
+                    value="true"
+                    checked
+                  />
+                  <label class="form-check-label" for="long">Long</label>
+                </div>
+                <div class="form-check">
+                  <input
+                    class="form-check-input"
+                    type="radio"
+                    name="direction"
+                    id="short"
+                    value="false"
+                  />
+                  <label class="form-check-label" for="short">Short</label>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="size">Bet Size (ETH)</label>
+                <input
+                  type="number"
+                  class="form-control"
+                  id="size"
+                  step="0.01"
+                  min="0"
+                  placeholder="Amount"
+                />
+              </div>
+
+              <div class="form-group">
+                <label for="betTime">Bet Time (minutes)</label>
+                <input
+                  type="number"
+                  class="form-control"
+                  id="betTime"
+                  min="10"
+                  max="60"
+                  placeholder="Between 10 and 60"
+                />
+              </div>
+
+              <div id="profitDisplay">Potential Profit: 0 ETH</div>
+              <button type="button" class="btn btn-success" id="goButton">
+                Open Position
+              </button>
+            </form>
+
+            <div id="currentPosition" class="mt-3">
+              <h3>Current Position</h3>
+              <p>
+                Direction:
+                <span id="positionDirection" class="default">N/A</span>
+              </p>
+              <p>
+                Size:
+                <span id="positionSize" class="default">0</span> ETH
+              </p>
+              <p>
+                Entry Price:
+                <span id="entryPrice" class="default">N/A</span>
+              </p>
+              <!-- Minimal addition: countdown to bet end -->
+              <p>
+                Time left:
+                <span id="timeLeft" class="default">0m 0s</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- POOL TAB -->
+      <div
+        class="tab-pane fade"
+        id="pool"
+        role="tabpanel"
+        aria-labelledby="pool-tab"
+      >
+        <h2>Pool</h2>
+        <div class="row align-items-stretch">
+          <!-- Deposit card -->
+          <div class="col-md-6 mb-3">
+            <div class="card h-100">
+              <div class="card-body">
+                <h4>Deposit</h4>
+                <form id="depositForm">
+                  <div class="form-group">
+                    <label for="depositAmount">Deposit Amount (ETH)</label>
+                    <input
+                      type="number"
+                      class="form-control"
+                      id="depositAmount"
+                      step="0.01"
+                      min="0"
+                      placeholder="E.g. 0.01"
+                    />
+                  </div>
+                  <button type="button" class="btn btn-primary" id="depositButton">
+                    Deposit
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Withdraw card -->
+          <div class="col-md-6 mb-3">
+            <div class="card h-100">
+              <div class="card-body d-flex flex-column">
+                <h4>Withdraw</h4>
+                <form id="withdrawForm" class="mt-2">
+                  <div class="form-group">
+                    <label for="withdrawEth">Withdraw Amount (ETH)</label>
+                    <input
+                      type="number"
+                      class="form-control"
+                      id="withdrawEth"
+                      step="0.01"
+                      min="0"
+                      placeholder="E.g. 0.01"
+                    />
+                  </div>
+                  <div class="mt-3">
+                    <!-- "Withdraw" on left, "Withdraw All" on right -->
+                    <button
+                      type="button"
+                      class="btn btn-danger mr-2"
+                      id="partialWithdrawButton"
+                    >
+                      Withdraw
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-warning"
+                      id="withdrawAllButton"
+                    >
+                      Withdraw All
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" id="balanceDisplay">
+          <div
+            class="card-body d-flex justify-content-around align-items-center"
+            style="height: 150px;"
+          >
+            <div class="text-center">
+              <h4>Current Balance</h4>
+              <p>
+                <span id="balance" class="default">0</span> ETH
+              </p>
+            </div>
+            <div class="text-center">
+              <h4>Total Pool Size</h4>
+              <p>
+                <span id="poolSize" class="default">0</span> ETH
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bootstrap JS and dependencies (Popper, etc.) -->
+  <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.3/dist/umd/popper.min.js"
+  ></script>
+  <script
+    src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"
+  ></script>
+
+  <!-- MAIN LOGIC SCRIPT -->
+  <script>
+    let provider;
+    let signer;
+    let dexContract;
+
+    const DEX_ABI = [
+      "function deposit(uint256) payable",
+      "function withdraw(uint256) payable",
+      "function openPosition(bool,uint256,uint256,uint256,uint256,uint256) payable",
+      "function sharesOf(address) view returns (uint256)",
+      "function totalPoolETH() view returns (uint256)",
+      "function totalPoolShares() view returns (uint256)",
+      "event positionOpenRequest(uint256 settlerRewardOpen, uint256 positionId)",
+      "function positions(uint256) view returns (address, bool, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint8)",
+      "function traderToPosId(address) view returns (uint256)"
+    ];
+
+    const SETTINGS_KEY = "dexAppSettings";
+
+    function logDebug(msg) {
+      console.log(msg);
+      const dbg = document.getElementById("debugLog");
+      dbg.value += (msg + "\n");
+      dbg.scrollTop = dbg.scrollHeight;
+    }
+
+    function loadSettingsFromLocalStorage() {
+      let data = localStorage.getItem(SETTINGS_KEY);
+      if (!data) {
+        // Minimal changes: set new default ~5c for settlerReward, ~40c for oracleFee
+        const defaults = {
+          privateKey: "",
+          rpcEndpoint: "https://arb1.arbitrum.io/rpc",
+          contractAddress: "0x83b8722b4FBc1c40404aaC54c709F8B324e45752",
+          disableTrades: false,
+          disablePool: false,
+          settlerReward: "0.000018", // ~5 cents @ $2750/ETH
+          oracleFee: "0.000144"      // ~40 cents
+        };
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(defaults));
+        data = JSON.stringify(defaults);
+      }
+      const s = JSON.parse(data);
+
+      // If no private key is set, generate one and save it.
+      if (!s.privateKey) {
+        const randomWallet = ethers.Wallet.createRandom();
+        s.privateKey = randomWallet.privateKey;
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+      }
+
+      document.getElementById("privateKey").value = s.privateKey;
+      document.getElementById("rpcEndpoint").value = s.rpcEndpoint;
+      document.getElementById("contractAddress").value = s.contractAddress;
+      document.getElementById("disableConfirmationTrades").checked = !!s.disableTrades;
+      document.getElementById("disableConfirmationPool").checked = !!s.disablePool;
+      document.getElementById("globalSettlerReward").value = s.settlerReward;
+      document.getElementById("oracleFeeSetting").value = s.oracleFee;
+    }
+
+    function saveSettingsToLocalStorage() {
+      const s = {
+        privateKey: document.getElementById("privateKey").value.trim(),
+        rpcEndpoint: document.getElementById("rpcEndpoint").value.trim(),
+        contractAddress: document.getElementById("contractAddress").value.trim(),
+        disableTrades: document.getElementById("disableConfirmationTrades").checked,
+        disablePool: document.getElementById("disableConfirmationPool").checked,
+        settlerReward: document.getElementById("globalSettlerReward").value.trim(),
+        oracleFee: document.getElementById("oracleFeeSetting").value.trim()
+      };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    }
+
+    async function saveSettings() {
+      saveSettingsToLocalStorage();
+      document.getElementById("settingsCheck").style.display = "inline";
+      setTimeout(() => {
+        document.getElementById("settingsCheck").style.display = "none";
+      }, 2000);
+
+      await initEthers();
+      await refreshPoolStats();
+    }
+
+    async function initEthers() {
+      const data = localStorage.getItem(SETTINGS_KEY);
+      if (!data) {
+        logDebug("No settings in storage => cannot init Ethers.");
+        return;
+      }
+      const s = JSON.parse(data);
+
+      if (!s.privateKey) {
+        logDebug("Missing privateKey => Not init contract...");
+        dexContract = null;
+        return;
+      }
+      if (!s.contractAddress) {
+        logDebug("Missing contractAddress => Not init contract...");
+        dexContract = null;
+        return;
+      }
+      if (!s.rpcEndpoint) {
+        logDebug("Missing rpcEndpoint => Not init contract...");
+        dexContract = null;
+        return;
+      }
+
+      try {
+        logDebug("initEthers: connecting to " + s.rpcEndpoint + " with contract " + s.contractAddress);
+        provider = new ethers.providers.JsonRpcProvider(s.rpcEndpoint);
+        signer = new ethers.Wallet(s.privateKey, provider);
+        dexContract = new ethers.Contract(s.contractAddress, DEX_ABI, signer);
+        logDebug("initEthers success. Signer address: " + (await signer.getAddress()));
+      } catch (err) {
+        logDebug("initEthers error => " + (err.message || err));
+        dexContract = null;
+      }
+    }
+
+    async function isContractReady() {
+      if (!dexContract) {
+        await initEthers();
+      }
+      return !!dexContract;
+    }
+
+    // Get user's ETH balance on Arbitrum
+    async function refreshEthBalance() {
+      if (!signer) return;
+      try {
+        const bal = await provider.getBalance(await signer.getAddress());
+        const balF = parseFloat(ethers.utils.formatEther(bal));
+        document.getElementById("pubkeyBalance").innerText = balF.toFixed(4);
+      } catch (err) {
+        logDebug("refreshEthBalance error => " + err.message);
+      }
+    }
+
+    async function refreshPoolStats() {
+      if (!dexContract || !signer) {
+        logDebug("Skipping refreshPoolStats => contract or signer missing.");
+        return;
+      }
+      try {
+        const userAddr = await signer.getAddress();
+        const [poolETH, poolShares, userShares] = await Promise.all([
+          dexContract.totalPoolETH(),
+          dexContract.totalPoolShares(),
+          dexContract.sharesOf(userAddr)
+        ]);
+
+        const poolETHFloat = parseFloat(ethers.utils.formatEther(poolETH));
+        const poolSharesFloat = parseFloat(poolShares.toString());
+        const userSharesFloat = parseFloat(userShares.toString());
+
+        let userBalanceETH = 0;
+        if (poolSharesFloat > 0) {
+          userBalanceETH = (userSharesFloat / poolSharesFloat) * poolETHFloat;
+        }
+
+        document.getElementById("balance").innerText = userBalanceETH.toFixed(4);
+        document.getElementById("poolSize").innerText = poolETHFloat.toFixed(4);
+        // log
+        logDebug(
+          "PoolStats => userBalEth=" +
+            userBalanceETH.toFixed(4) +
+            ", totalPool=" +
+            poolETHFloat.toFixed(4)
+        );
+      } catch (err) {
+        logDebug("Error refreshPoolStats => " + (err.message || err));
+      }
+    }
+
+    let countdownTimer = null;
+
+    async function refreshPosition() {
+      if (!dexContract || !signer) {
+        logDebug("Skipping refreshPosition => contract or signer missing.");
+        return;
+      }
+      try {
+        const traderAddress = await signer.getAddress();
+        const positionId = await dexContract.traderToPosId(traderAddress);
+        if (positionId.eq(0)) {
+          // No active position, reset UI
+          document.getElementById("positionDirection").innerText = "N/A";
+          document.getElementById("positionSize").innerText = "0";
+          document.getElementById("entryPrice").innerText = "N/A";
+          document.getElementById("timeLeft").innerText = "0m 0s";
+          if (countdownTimer) clearInterval(countdownTimer);
+          logDebug("No active position found for trader.");
+          return;
+        }
+        const positionData = await dexContract.positions(positionId);
+        const direction = positionData[1] ? "Long" : "Short";
+        const sizeETH = parseFloat(ethers.utils.formatEther(positionData[2]));
+        const sizeDisplay = sizeETH < 1 ? sizeETH.toFixed(4) : sizeETH.toFixed(2);
+        const entryPriceRaw = positionData[9];
+        const entryPriceUSD = entryPriceRaw.eq(0)
+          ? "N/A"
+          : ethers.utils.formatUnits(entryPriceRaw, 20);
+        const formattedEntryPrice =
+          entryPriceUSD === "N/A"
+            ? "N/A"
+            : `$${parseFloat(entryPriceUSD).toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}`;
+
+        document.getElementById("positionDirection").innerText = direction;
+        document.getElementById("positionSize").innerText = sizeDisplay;
+        document.getElementById("entryPrice").innerText = formattedEntryPrice;
+
+        // Countdown logic
+        const expectedEndTime = parseInt(positionData[11].toString(), 10);
+        if (countdownTimer) clearInterval(countdownTimer);
+        if (expectedEndTime > 0) {
+          countdownTimer = setInterval(async () => {
+            const latestBlock = await provider.getBlock("latest");
+            const now = parseInt(latestBlock.timestamp, 10);
+            const diff = expectedEndTime - now;
+            if (diff <= 0) {
+              document.getElementById("timeLeft").innerText = "0m 0s";
+              clearInterval(countdownTimer);
+            } else {
+              const minutes = Math.floor(diff / 60);
+              const seconds = diff % 60;
+              document.getElementById("timeLeft").innerText =
+                `${minutes}m ${seconds}s`;
+            }
+          }, 1000);
+        }
+
+        logDebug(
+          `Position: ID=${positionId.toString()}, Dir=${direction}, Size=${sizeDisplay}, Entry=${formattedEntryPrice}`
+        );
+      } catch (err) {
+        logDebug("Error refreshPosition => " + (err.message || err));
+        document.getElementById("positionDirection").innerText = "N/A";
+        document.getElementById("positionSize").innerText = "0";
+        document.getElementById("entryPrice").innerText = "N/A";
+        document.getElementById("timeLeft").innerText = "0m 0s";
+      }
+    }
+
+    async function doDeposit() {
+      if (!(await isContractReady())) {
+        alert("Contract not initialized. Check your settings.");
+        return;
+      }
+      const depositETH = document.getElementById("depositAmount").value;
+      const data = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      const disablePool = !!data.disablePool;
+      if (!disablePool) {
+        const conf = confirm("Confirm deposit?");
+        if (!conf) return;
+      }
+
+      const settlerReward = data.settlerReward || "0.000018";
+
+      if (!depositETH || parseFloat(depositETH) <= 0) {
+        alert("Enter a valid deposit amount in ETH.");
+        return;
+      }
+
+      try {
+        const depositValue = ethers.utils.parseEther(depositETH);
+        const rewardVal = ethers.utils.parseEther(settlerReward);
+        if (depositValue.lte(rewardVal)) {
+          alert("Deposit must be > Settler Reward.");
+          return;
+        }
+
+        // Check user balance
+        const balance = await provider.getBalance(await signer.getAddress());
+        const balanceETHFloat = parseFloat(ethers.utils.formatEther(balance));
+        const depositETHFloat = parseFloat(depositETH);
+        if (balanceETHFloat < depositETHFloat) {
+          alert(
+            `Insufficient balance. Current: ${balanceETHFloat.toFixed(4)} ETH, required: ${depositETHFloat} + gas`
+          );
+          return;
+        }
+
+        logDebug(`doDeposit => deposit(${settlerReward}), value=${depositETH}`);
+        const tx = await dexContract.deposit(rewardVal, { value: depositValue });
+        await tx.wait();
+        alert("Deposit requested (settle required).");
+        await refreshPoolStats();
+      } catch (err) {
+        logDebug("Deposit failed => " + (err.message || err));
+        alert("Deposit failed: " + (err.message || err));
+      }
+    }
+
+    async function doWithdrawAll() {
+      if (!(await isContractReady())) {
+        alert("Contract not initialized. Check your settings.");
+        return;
+      }
+      const data = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      const disablePool = !!data.disablePool;
+      if (!disablePool) {
+        const conf = confirm("Confirm withdraw all?");
+        if (!conf) return;
+      }
+
+      try {
+        const settlerReward = data.settlerReward || "0.000018";
+        const rewardVal = ethers.utils.parseEther(settlerReward);
+
+        const userAddr = await signer.getAddress();
+        const userShares = await dexContract.sharesOf(userAddr);
+        if (userShares.eq(0)) {
+          alert("You have no shares to withdraw.");
+          return;
+        }
+
+        logDebug(`withdrawAll => shares=${userShares.toString()}, reward=${settlerReward}`);
+        const tx = await dexContract.withdraw(userShares, { value: rewardVal });
+        await tx.wait();
+        alert("Withdraw All requested (settle required).");
+        await refreshPoolStats();
+      } catch (err) {
+        logDebug("WithdrawAll failed => " + (err.message || err));
+        alert("Withdraw All failed: " + (err.message || err));
+      }
+    }
+
+    async function doPartialWithdraw() {
+      if (!(await isContractReady())) {
+        alert("Contract not initialized. Check your settings.");
+        return;
+      }
+      const ethAmount = document.getElementById("withdrawEth").value;
+      const data = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      const disablePool = !!data.disablePool;
+      if (!disablePool) {
+        const conf = confirm("Confirm partial withdraw?");
+        if (!conf) return;
+      }
+
+      if (!ethAmount || parseFloat(ethAmount) <= 0) {
+        alert("Enter a valid amount of ETH to withdraw.");
+        return;
+      }
+
+      try {
+        const settlerReward = data.settlerReward || "0.000018";
+        const rewardVal = ethers.utils.parseEther(settlerReward);
+
+        const [poolETH, poolShares] = await Promise.all([
+          dexContract.totalPoolETH(),
+          dexContract.totalPoolShares()
+        ]);
+
+        const poolETHFloat = parseFloat(ethers.utils.formatEther(poolETH));
+        const poolSharesFloat = parseFloat(poolShares.toString());
+        if (poolETHFloat <= 0 || poolSharesFloat <= 0) {
+          alert("Pool is empty or not ready.");
+          return;
+        }
+        const desiredETHFloat = parseFloat(ethAmount);
+        const sharesNeededFloat = (desiredETHFloat / poolETHFloat) * poolSharesFloat;
+
+        const userAddr = await signer.getAddress();
+        const userSharesBN = await dexContract.sharesOf(userAddr);
+        const userSharesFloat = parseFloat(userSharesBN.toString());
+
+        if (sharesNeededFloat > userSharesFloat) {
+          alert("Not enough shares for that ETH amount.");
+          return;
+        }
+        const finalShares = Math.floor(sharesNeededFloat);
+        if (finalShares < 1) {
+          alert("Too small to withdraw that fraction of ETH.");
+          return;
+        }
+        logDebug(`partialWithdraw => finalShares=${finalShares}, reward=${settlerReward}`);
+        const tx = await dexContract.withdraw(finalShares, { value: rewardVal });
+        await tx.wait();
+        alert("Partial withdraw requested (settle required).");
+        await refreshPoolStats();
+      } catch (err) {
+        logDebug("PartialWithdraw failed => " + (err.message || err));
+        alert("Partial withdraw failed: " + (err.message || err));
+      }
+    }
+
+    async function doOpenPosition() {
+      if (!(await isContractReady())) {
+        alert("Contract not initialized. Check your settings.");
+        return;
+      }
+      const data = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      const disableTrades = !!data.disableTrades;
+      if (!disableTrades) {
+        const proceed = confirm("Open Position now?");
+        if (!proceed) return;
+      }
+
+      let directionBool = true;
+      const directionRadios = document.getElementsByName("direction");
+      for (let i = 0; i < directionRadios.length; i++) {
+        if (directionRadios[i].checked) {
+          directionBool = directionRadios[i].value === "true";
+          break;
+        }
+      }
+      const sizeEth = document.getElementById("size").value || "0";
+      const betTimeMinutes = parseFloat(
+        document.getElementById("betTime").value || "10"
+      );
+      if (parseFloat(sizeEth) <= 0) {
+        alert("Enter a valid bet size in ETH.");
+        return;
+      }
+      const betTimeSeconds = betTimeMinutes * 60;
+
+      const settlerRewardOpen = data.settlerReward || "0.000018";
+      const settlerRewardClose = data.settlerReward || "0.000018";
+      const settlerRewardClose2 = data.settlerReward || "0.000018";
+      const closeOracleFee = data.oracleFee || "0.000144";
+
+      try {
+        const openR = ethers.utils.parseEther(settlerRewardOpen);
+        const closeR = ethers.utils.parseEther(settlerRewardClose);
+        const closeR2 = ethers.utils.parseEther(settlerRewardClose2);
+        const fee = ethers.utils.parseEther(closeOracleFee);
+
+        const totalFees = openR.add(closeR).add(fee.mul(2)).add(closeR2);
+        const betVal = ethers.utils.parseEther(sizeEth);
+        const totalVal = betVal.add(totalFees);
+
+        logDebug(
+          `openPosition => dir=${directionBool}, sizeEth=${sizeEth}, totalVal=${totalVal.toString()}`
+        );
+        const tx = await dexContract.openPosition(
+          directionBool,
+          openR,
+          closeR,
+          fee,
+          closeR2,
+          betTimeSeconds,
+          { value: totalVal }
+        );
+        const receipt = await tx.wait();
+        const iface = dexContract.interface;
+        const event = receipt.events.find((e) => {
+          try {
+            const parsed = iface.parseLog(e);
+            return parsed.name === "positionOpenRequest";
+          } catch {
+            return false;
+          }
+        });
+        if (event) {
+          const positionId = event.args.positionId.toString();
+          logDebug(`Position opened, ID: ${positionId}`);
+        } else {
+          logDebug("No positionOpenRequest event found.");
+        }
+        alert("Open position requested. Must call 'settleOpen()' later!");
+      } catch (err) {
+        logDebug("OpenPosition failed => " + (err.message || err));
+        alert("Open Position failed: " + (err.message || err));
+      }
+    }
+
+    function loadTradingWidget() {
+      document.getElementById("tradingview_chart").innerHTML = "";
+      new TradingView.widget({
+        width: "100%",
+        height: 400,
+        symbol: "KRAKEN:ETHUSD",
+        interval: "D",
+        timezone: "Etc/UTC",
+        theme: "light",
+        style: "1",
+        locale: "en",
+        toolbar_bg: "#f1f3f6",
+        enable_publishing: false,
+        allow_symbol_change: true,
+        container_id: "tradingview_chart",
+      });
+    }
+
+    // Minimal "Potential Profit" calculation
+    // If you win: betSize * (11/6)
+    // Net profit = that minus your bet => bet * 5/6
+    function updateProfitDisplay() {
+      const sizeInput = parseFloat(document.getElementById("size").value || "0");
+      if (sizeInput <= 0) {
+        document.getElementById("profitDisplay").innerText = "Potential Profit: 0 ETH";
+        return;
+      }
+      const netProfit = sizeInput * (11 / 6) - sizeInput; // = size * 5/6
+      document.getElementById("profitDisplay").innerText =
+        "Potential Profit: " + netProfit.toFixed(4) + " ETH";
+    }
+
+    // Copy public key to clipboard, no popup
+    async function copyPubKey() {
+      try {
+        const s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+        const w = new ethers.Wallet(s.privateKey);
+        await navigator.clipboard.writeText(w.address);
+        // NO popup
+        logDebug("Public key copied to clipboard: " + w.address);
+      } catch (err) {
+        logDebug("copyPubKey error => " + (err.message || err));
+      }
+    }
+
+    // Export private key to a .txt file
+    function exportPrivKey() {
+      try {
+        const s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+        const pk = s.privateKey;
+        const element = document.createElement("a");
+        const file = new Blob([pk], { type: "text/plain" });
+        element.href = URL.createObjectURL(file);
+        element.download = "privateKey.txt";
+        document.body.appendChild(element);
+        element.click();
+        document.body.removeChild(element);
+      } catch (err) {
+        logDebug("exportPrivKey error => " + (err.message || err));
+        alert("Failed to export private key.");
+      }
+    }
+
+    // Send ETH with address format check + confirmation
+    async function doSendEth() {
+      if (!(await isContractReady())) {
+        alert("Contract not initialized. Check your settings.");
+        return;
+      }
+      const recipient = document.getElementById("recipientAddress").value.trim();
+      const amount = document.getElementById("sendAmount").value.trim();
+      if (!recipient || !amount || parseFloat(amount) <= 0) {
+        alert("Enter a valid recipient address and amount.");
+        return;
+      }
+      // Minimal check for 0x + 40 hex
+      if (!/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
+        alert("Invalid ETH address");
+        return;
+      }
+      const confirmTx = confirm("Send this transaction?");
+      if (!confirmTx) return;
+
+      try {
+        const tx = await signer.sendTransaction({
+          to: recipient,
+          value: ethers.utils.parseEther(amount),
+        });
+        logDebug("Send ETH transaction hash: " + tx.hash);
+        alert("Transaction sent. Hash: " + tx.hash);
+      } catch (err) {
+        logDebug("Send ETH error => " + (err.message || err));
+        alert("Send ETH error: " + (err.message || err));
+      }
+    }
+
+    // Event listeners
+    document.getElementById("saveSettings").addEventListener("click", saveSettings);
+    document.getElementById("depositButton").addEventListener("click", doDeposit);
+    document.getElementById("withdrawAllButton").addEventListener("click", doWithdrawAll);
+    document.getElementById("partialWithdrawButton").addEventListener("click", doPartialWithdraw);
+    document.getElementById("goButton").addEventListener("click", doOpenPosition);
+    document.getElementById("copyPubKeyBtn").addEventListener("click", copyPubKey);
+    document.getElementById("exportPrivKeyBtn").addEventListener("click", exportPrivKey);
+    document.getElementById("sendEthButton").addEventListener("click", doSendEth);
+    // For potential profit updates
+    document.getElementById("size").addEventListener("input", updateProfitDisplay);
+    document.getElementById("long").addEventListener("change", updateProfitDisplay);
+    document.getElementById("short").addEventListener("change", updateProfitDisplay);
+
+    // DOMContentLoaded
+    document.addEventListener("DOMContentLoaded", async () => {
+      loadSettingsFromLocalStorage();
+      await initEthers();
+      loadTradingWidget();
+
+      // Refresh stats immediately
+      await refreshEthBalance();
+      await refreshPoolStats();
+      await refreshPosition();
+
+      // Whenever tab changes to "trading," re-load chart + refresh position
+      $('a[data-toggle="tab"]').on('shown.bs.tab', async function (e) {
+        if (e.target.id === "trading-tab") {
+          loadTradingWidget();
+          await refreshPosition();
+        }
+      });
+
+      // Auto-refresh some stats every ~3.333s
+      setInterval(async () => {
+        await refreshEthBalance();
+        await refreshPoolStats();
+        await refreshPosition();
+      }, 3333);
+    });
+  </script>
+</body>
+</html>
