@@ -13,7 +13,8 @@ interface IOpenOracle {
         uint256 settlementTime
     ) external payable returns (uint256);
 
-    function settle(uint256 reportId) external returns (uint256 price, uint256 settlementTimestamp);
+    function getSettlementData(uint256 reportId) external view returns (uint256 price, uint256 settlementTimestamp);
+
 }
 
 contract SimpleBinaryBetDEX is ReentrancyGuard {
@@ -359,7 +360,7 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
         require(activeTradeRequest[p.trader], "No active trade found");
         require(!q.refunded, "Position refunded");
 
-        (uint256 price, ) = oracle.settle(p.openOracleId);
+        (uint256 price, ) = oracle.getSettlementData(p.openOracleId);
         require(price > 0, "Oracle not settled yet");
 
         p.openPrice = 1e50 / price;
@@ -454,7 +455,7 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
 
         require(p.state == PositionState.WaitingCloseOracle, "Not waitingCloseOracle");
 
-        (uint256 closePrice_, ) = oracle.settle(p.closeOracleId);
+        (uint256 closePrice_, ) = oracle.getSettlementData(p.closeOracleId);
         require(closePrice_ > 0, "Close price not settled");
 
         (bool success, ) = payable(msg.sender).call{value: p.settlerRewardClose2}("");
