@@ -169,9 +169,18 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
         req.settled = true;
 
         uint256 depositAmount = req.amountETH - req.settlerReward;
+
+        uint256 poolShares;
+        if (totalPoolShares == 0) {
+            poolShares = depositAmount;
+        } else {
+        poolShares = depositAmount * totalPoolShares / (totalPoolETH);
+        }
+
         totalPoolETH += depositAmount;
-        sharesOf[req.user] += depositAmount;
-        totalPoolShares += depositAmount;
+
+        sharesOf[req.user] += poolShares;
+        totalPoolShares += poolShares;
 
         emit depositSettled(depositId);
 
