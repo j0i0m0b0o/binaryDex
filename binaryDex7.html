@@ -48,6 +48,10 @@
       margin-top: 10px;
       font-weight: bold;
     }
+    #totalCostDisplay {
+      margin-top: 5px;
+      font-weight: bold;
+    }
     #currentPosition,
     #balanceDisplay {
       margin-top: 20px;
@@ -190,7 +194,7 @@
               type="text"
               class="form-control"
               id="contractAddress"
-              placeholder="0x83b8722b4FBc1c40404aaC54c709F8B324e45752"
+              placeholder="0x3dBeaD4113ef6BeC532a3cB9A3Ca692Ba9239B3C"
             />
           </div>
 
@@ -327,8 +331,12 @@
                 </div>
               </div>
 
+              <!-- Display the max bet next to "Bet Size (ETH)" -->
               <div class="form-group">
-                <label for="size">Bet Size (ETH)</label>
+                <label for="size">
+                  Bet Size (ETH)
+                  <span id="maxBetSpan" class="default"></span>
+                </label>
                 <input
                   type="number"
                   class="form-control"
@@ -352,6 +360,8 @@
               </div>
 
               <div id="profitDisplay">Potential Profit: 0 ETH</div>
+              <div id="totalCostDisplay">Total (incl. Fees): 0 ETH</div>
+
               <button type="button" class="btn btn-success" id="goButton">
                 Open Position
               </button>
@@ -493,6 +503,11 @@
     let signer;
     let dexContract;
 
+    // We store these to compute max bet
+    let poolSizeGlobal = 0;
+    let totalLongOIGlobal = 0;
+    let totalShortOIGlobal = 0;
+
     const DEX_ABI = [
       "function deposit(uint256) payable",
       "function withdraw(uint256) payable",
@@ -500,6 +515,8 @@
       "function sharesOf(address) view returns (uint256)",
       "function totalPoolETH() view returns (uint256)",
       "function totalPoolShares() view returns (uint256)",
+      "function totalLongOI() view returns (uint256)",
+      "function totalShortOI() view returns (uint256)",
       "event positionOpenRequest(uint256 settlerRewardOpen, uint256 positionId)",
       "function positions(uint256) view returns (address, bool, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint8)",
       "function traderToPosId(address) view returns (uint256)"
@@ -517,22 +534,20 @@
     function loadSettingsFromLocalStorage() {
       let data = localStorage.getItem(SETTINGS_KEY);
       if (!data) {
-        // Minimal changes: set new default ~5c for settlerReward, ~40c for oracleFee
         const defaults = {
           privateKey: "",
           rpcEndpoint: "https://arb1.arbitrum.io/rpc",
-          contractAddress: "0x83b8722b4FBc1c40404aaC54c709F8B324e45752",
+          contractAddress: "0x3dBeaD4113ef6BeC532a3cB9A3Ca692Ba9239B3C",
           disableTrades: false,
           disablePool: false,
-          settlerReward: "0.000018", // ~5 cents @ $2750/ETH
-          oracleFee: "0.000144"      // ~40 cents
+          settlerReward: "0.000018",
+          oracleFee: "0.000144"
         };
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(defaults));
         data = JSON.stringify(defaults);
       }
       const s = JSON.parse(data);
 
-      // If no private key is set, generate one and save it.
       if (!s.privateKey) {
         const randomWallet = ethers.Wallet.createRandom();
         s.privateKey = randomWallet.privateKey;
@@ -580,18 +595,8 @@
       }
       const s = JSON.parse(data);
 
-      if (!s.privateKey) {
-        logDebug("Missing privateKey => Not init contract...");
-        dexContract = null;
-        return;
-      }
-      if (!s.contractAddress) {
-        logDebug("Missing contractAddress => Not init contract...");
-        dexContract = null;
-        return;
-      }
-      if (!s.rpcEndpoint) {
-        logDebug("Missing rpcEndpoint => Not init contract...");
+      if (!s.privateKey || !s.contractAddress || !s.rpcEndpoint) {
+        logDebug("Missing required fields => Not init contract...");
         dexContract = null;
         return;
       }
@@ -615,7 +620,11 @@
       return !!dexContract;
     }
 
-    // Get user's ETH balance on Arbitrum
+    // Helper for two significant digits
+    function twoSig(value) {
+      return Number(value.toPrecision(2));
+    }
+
     async function refreshEthBalance() {
       if (!signer) return;
       try {
@@ -627,6 +636,7 @@
       }
     }
 
+    // Also read totalLongOI and totalShortOI
     async function refreshPoolStats() {
       if (!dexContract || !signer) {
         logDebug("Skipping refreshPoolStats => contract or signer missing.");
@@ -634,15 +644,25 @@
       }
       try {
         const userAddr = await signer.getAddress();
-        const [poolETH, poolShares, userShares] = await Promise.all([
+        // Now we also read totalLongOI and totalShortOI
+        const [poolETH, poolShares, userShares, longOI, shortOI] = await Promise.all([
           dexContract.totalPoolETH(),
           dexContract.totalPoolShares(),
-          dexContract.sharesOf(userAddr)
+          dexContract.sharesOf(userAddr),
+          dexContract.totalLongOI(),
+          dexContract.totalShortOI()
         ]);
 
         const poolETHFloat = parseFloat(ethers.utils.formatEther(poolETH));
         const poolSharesFloat = parseFloat(poolShares.toString());
         const userSharesFloat = parseFloat(userShares.toString());
+        const longOIFloat = parseFloat(ethers.utils.formatEther(longOI));
+        const shortOIFloat = parseFloat(ethers.utils.formatEther(shortOI));
+
+        // store
+        poolSizeGlobal = poolETHFloat;
+        totalLongOIGlobal = longOIFloat;
+        totalShortOIGlobal = shortOIFloat;
 
         let userBalanceETH = 0;
         if (poolSharesFloat > 0) {
@@ -651,20 +671,18 @@
 
         document.getElementById("balance").innerText = userBalanceETH.toFixed(4);
         document.getElementById("poolSize").innerText = poolETHFloat.toFixed(4);
-        // log
-        logDebug(
-          "PoolStats => userBalEth=" +
-            userBalanceETH.toFixed(4) +
-            ", totalPool=" +
-            poolETHFloat.toFixed(4)
-        );
+        logDebug("PoolStats => userBalEth=" + userBalanceETH.toFixed(4) + ", totalPool=" + poolETHFloat.toFixed(4) +
+                 ", totalLongOI=" + longOIFloat.toFixed(4) + ", totalShortOI=" + shortOIFloat.toFixed(4));
+
+        // Also update max bet display after we refresh
+        updateMaxBetDisplay();
+        updateProfitDisplay(); // recalc total cost
       } catch (err) {
         logDebug("Error refreshPoolStats => " + (err.message || err));
       }
     }
 
     let countdownTimer = null;
-
     async function refreshPosition() {
       if (!dexContract || !signer) {
         logDebug("Skipping refreshPosition => contract or signer missing.");
@@ -674,7 +692,6 @@
         const traderAddress = await signer.getAddress();
         const positionId = await dexContract.traderToPosId(traderAddress);
         if (positionId.eq(0)) {
-          // No active position, reset UI
           document.getElementById("positionDirection").innerText = "N/A";
           document.getElementById("positionSize").innerText = "0";
           document.getElementById("entryPrice").innerText = "N/A";
@@ -703,7 +720,6 @@
         document.getElementById("positionSize").innerText = sizeDisplay;
         document.getElementById("entryPrice").innerText = formattedEntryPrice;
 
-        // Countdown logic
         const expectedEndTime = parseInt(positionData[11].toString(), 10);
         if (countdownTimer) clearInterval(countdownTimer);
         if (expectedEndTime > 0) {
@@ -717,15 +733,12 @@
             } else {
               const minutes = Math.floor(diff / 60);
               const seconds = diff % 60;
-              document.getElementById("timeLeft").innerText =
-                `${minutes}m ${seconds}s`;
+              document.getElementById("timeLeft").innerText = `${minutes}m ${seconds}s`;
             }
           }, 1000);
         }
 
-        logDebug(
-          `Position: ID=${positionId.toString()}, Dir=${direction}, Size=${sizeDisplay}, Entry=${formattedEntryPrice}`
-        );
+        logDebug(`Position: ID=${positionId}, Dir=${direction}, Size=${sizeDisplay}, Entry=${formattedEntryPrice}`);
       } catch (err) {
         logDebug("Error refreshPosition => " + (err.message || err));
         document.getElementById("positionDirection").innerText = "N/A";
@@ -735,7 +748,8 @@
       }
     }
 
-    async function doDeposit() {
+    // Our existing open/close pool or position handlers remain the same
+    async function doDeposit() { /* unchanged below... */ 
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -786,6 +800,7 @@
     }
 
     async function doWithdrawAll() {
+      /* unchanged... */
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -820,6 +835,7 @@
     }
 
     async function doPartialWithdraw() {
+      /* unchanged... */
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -880,6 +896,7 @@
     }
 
     async function doOpenPosition() {
+      /* unchanged... */
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -900,9 +917,7 @@
         }
       }
       const sizeEth = document.getElementById("size").value || "0";
-      const betTimeMinutes = parseFloat(
-        document.getElementById("betTime").value || "10"
-      );
+      const betTimeMinutes = parseFloat(document.getElementById("betTime").value || "10");
       if (parseFloat(sizeEth) <= 0) {
         alert("Enter a valid bet size in ETH.");
         return;
@@ -977,34 +992,70 @@
       });
     }
 
-    // Minimal "Potential Profit" calculation
-    // If you win: betSize * (11/6)
-    // Net profit = that minus your bet => bet * 5/6
-    function updateProfitDisplay() {
-      const sizeInput = parseFloat(document.getElementById("size").value || "0");
-      if (sizeInput <= 0) {
-        document.getElementById("profitDisplay").innerText = "Potential Profit: 0 ETH";
+    // Show "Max X ETH" factoring totalLongOI or totalShortOI
+    function updateMaxBetDisplay() {
+      if (!poolSizeGlobal) {
+        document.getElementById("maxBetSpan").innerText = "";
         return;
       }
-      const netProfit = sizeInput * (11 / 6) - sizeInput; // = size * 5/6
-      document.getElementById("profitDisplay").innerText =
-        "Potential Profit: " + netProfit.toFixed(4) + " ETH";
+      const directionRadios = document.getElementsByName("direction");
+      let isLong = true;
+      for (let i = 0; i < directionRadios.length; i++) {
+        if (directionRadios[i].checked) {
+          isLong = directionRadios[i].value === "true";
+          break;
+        }
+      }
+
+      // formula => if long => maxBet = (poolSizeGlobal/10 - totalLongOIGlobal)
+      // if short => maxBet = (poolSizeGlobal/10 - totalShortOIGlobal)
+      let raw;
+      if (isLong) {
+        raw = (poolSizeGlobal / 10) - totalLongOIGlobal;
+      } else {
+        raw = (poolSizeGlobal / 10) - totalShortOIGlobal;
+      }
+      if (raw < 0) raw = 0; // clamp
+      const maxVal = twoSig(raw);
+      document.getElementById("maxBetSpan").innerText = `(Max ${maxVal} ETH)`;
     }
 
-    // Copy public key to clipboard, no popup
+    // Potential Profit & "Total incl. Fees" logic
+    function updateProfitDisplay() {
+      updateMaxBetDisplay(); // ensure "Max X ETH" is fresh
+
+      const sizeInput = parseFloat(document.getElementById("size").value || "0");
+      const data = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      const settlerReward = parseFloat(data.settlerReward || "0.000018");
+      const oracleFee = parseFloat(data.oracleFee || "0.000144");
+
+      if (sizeInput <= 0) {
+        document.getElementById("profitDisplay").innerText = "Potential Profit: 0 ETH";
+        document.getElementById("totalCostDisplay").innerText = "Total (incl. Fees): 0 ETH";
+        return;
+      }
+      const netProfit = sizeInput * (11 / 6) - sizeInput; // bet * 5/6
+      document.getElementById("profitDisplay").innerText =
+        "Potential Profit: " + netProfit.toFixed(4) + " ETH";
+
+      // 3 settler rewards + 2 oracle fees + bet size
+      const totalFees = (3 * settlerReward) + (2 * oracleFee);
+      const total = sizeInput + totalFees;
+      document.getElementById("totalCostDisplay").innerText =
+        "Total (incl. Fees): " + total.toFixed(4) + " ETH";
+    }
+
     async function copyPubKey() {
       try {
         const s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
         const w = new ethers.Wallet(s.privateKey);
         await navigator.clipboard.writeText(w.address);
-        // NO popup
         logDebug("Public key copied to clipboard: " + w.address);
       } catch (err) {
         logDebug("copyPubKey error => " + (err.message || err));
       }
     }
 
-    // Export private key to a .txt file
     function exportPrivKey() {
       try {
         const s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
@@ -1022,7 +1073,6 @@
       }
     }
 
-    // Send ETH with address format check + confirmation
     async function doSendEth() {
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
@@ -1034,7 +1084,6 @@
         alert("Enter a valid recipient address and amount.");
         return;
       }
-      // Minimal check for 0x + 40 hex
       if (!/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
         alert("Invalid ETH address");
         return;
@@ -1055,7 +1104,32 @@
       }
     }
 
-    // Event listeners
+    document.addEventListener("DOMContentLoaded", async () => {
+      loadSettingsFromLocalStorage();
+      await initEthers();
+      loadTradingWidget(); // Load chart once
+
+      // Refresh stats
+      await refreshEthBalance();
+      await refreshPoolStats();
+      await refreshPosition();
+
+      // Only refresh position on tab switch, do not reload chart
+      $('a[data-toggle="tab"]').on('shown.bs.tab', async function (e) {
+        if (e.target.id === "trading-tab") {
+          await refreshPosition();
+        }
+      });
+
+      // Auto-refresh every ~3.333s
+      setInterval(async () => {
+        await refreshEthBalance();
+        await refreshPoolStats();
+        await refreshPosition();
+      }, 3333);
+    });
+
+    // Button listeners
     document.getElementById("saveSettings").addEventListener("click", saveSettings);
     document.getElementById("depositButton").addEventListener("click", doDeposit);
     document.getElementById("withdrawAllButton").addEventListener("click", doWithdrawAll);
@@ -1064,37 +1138,11 @@
     document.getElementById("copyPubKeyBtn").addEventListener("click", copyPubKey);
     document.getElementById("exportPrivKeyBtn").addEventListener("click", exportPrivKey);
     document.getElementById("sendEthButton").addEventListener("click", doSendEth);
-    // For potential profit updates
+
+    // Recalc max bet & profit on user input
     document.getElementById("size").addEventListener("input", updateProfitDisplay);
     document.getElementById("long").addEventListener("change", updateProfitDisplay);
     document.getElementById("short").addEventListener("change", updateProfitDisplay);
-
-    // DOMContentLoaded
-    document.addEventListener("DOMContentLoaded", async () => {
-      loadSettingsFromLocalStorage();
-      await initEthers();
-      loadTradingWidget();
-
-      // Refresh stats immediately
-      await refreshEthBalance();
-      await refreshPoolStats();
-      await refreshPosition();
-
-      // Whenever tab changes to "trading," re-load chart + refresh position
-      $('a[data-toggle="tab"]').on('shown.bs.tab', async function (e) {
-        if (e.target.id === "trading-tab") {
-          loadTradingWidget();
-          await refreshPosition();
-        }
-      });
-
-      // Auto-refresh some stats every ~3.333s
-      setInterval(async () => {
-        await refreshEthBalance();
-        await refreshPoolStats();
-        await refreshPosition();
-      }, 3333);
-    });
   </script>
 </body>
 </html>
