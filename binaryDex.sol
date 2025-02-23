@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
+
 interface IOpenOracle {
     function createReportInstance(
         address token1Address,
@@ -310,11 +311,12 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
 
         uint256 size = msg.value - totalFees;
         require(size > uint256(25000));
+        // max pool net exposure is optimal fraction given +83.33% profit, -100% loss and 50/50 outcome.
         if (direction) {
-            require(totalLongOI + size <= (totalPoolETH / 2), "Long OI cap");
+            require(totalLongOI + size <= (totalPoolETH / 10), "Long OI cap");
             totalLongOI += size;
         } else {
-            require(totalShortOI + size <= (totalPoolETH / 2), "Short OI cap");
+            require(totalShortOI + size <= (totalPoolETH / 10), "Short OI cap");
             totalShortOI += size;
         }
 
@@ -476,11 +478,18 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
 
         if (isWin) {
             uint256 payout = (p.sizeETH * WIN_NUMERATOR) / WIN_DENOMINATOR;
-            require(payout <= totalPoolETH, "Pool insufficient");
-            totalPoolETH -= (payout - p.sizeETH);
 
+            if((payout - p.sizeETH) <= totalPoolETH){
+            totalPoolETH -= (payout - p.sizeETH);
             (bool s2, ) = payable(p.trader).call{value: payout}("");
             require(s2, "Trader payout fail");
+
+            }else{
+            //refund trader their initial bet size
+            (bool s2, ) = payable(p.trader).call{value: p.sizeETH}("");
+            require(s2, "Trader return initial bet size fail");
+            }
+
         } else {
             totalPoolETH += p.sizeETH;
         }
