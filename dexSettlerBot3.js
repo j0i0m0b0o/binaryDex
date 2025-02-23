@@ -121,6 +121,19 @@ const contractAbi = [
     "payable": false,
     "stateMutability": "view",
     "type": "function"
+  },
+
+  // -------------------------------------------------
+  // Getter for nextPositionId (public variable in contract)
+  // -------------------------------------------------
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "nextPositionId",
+    "outputs": [{ "name": "", "type": "uint256" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
   }
 ];
 
@@ -208,6 +221,16 @@ async function endPositionNow(contractInst, posId, user) {
       gasPrice: bumpedGasPriceBN.toString()
     });
     console.log(`endPosition(${posId}) success - Tx: ${receipt.transactionHash}`);
+
+    // Read position data to get closeOracleId
+    const positionData = await contractInst.methods.positions(posId).call();
+    const closeOracleId = positionData.closeOracleId;
+    if (closeOracleId && closeOracleId != '0') {
+      closeOracleIdToPosId[closeOracleId] = posId;
+      console.log(`Mapped closeOracleId ${closeOracleId} -> posId ${posId} after endPosition`);
+    } else {
+      console.warn(`No closeOracleId found for posId=${posId} after endPosition`);
+    }
   } catch (err) {
     console.error(`endPosition(${posId}) failed:`, err.message);
   }
@@ -437,7 +460,31 @@ function attachEventListeners() {
         console.error(`Error in finalizeEndPosition(${posId}):`, err.message);
       }
     } else {
-      console.log(`No mapping found for reportId=${reportId}, ignoring.`);
+      console.log(`No mapping found for reportId=${reportId}, checking on-chain...`);
+      try {
+        const nextPosId = await contract.methods.nextPositionId().call();
+        for (let i = 1; i < nextPosId; i++) {
+          const pos = await contract.methods.positions(i).call();
+          if (pos.closeOracleId === reportId && parseInt(pos.state, 10) === 3) { // WaitingCloseOracle
+            console.log(`Found posId=${i} with closeOracleId=${reportId}, calling finalizeEndPosition(${i})...`);
+            const methodCall = contract.methods.finalizeEndPosition(i);
+            const baseGas = await methodCall.estimateGas({ from: account });
+            const finalGas = Math.floor(baseGas * 1.2);
+            const recommendedGasPrice = await web3.eth.getGasPrice();
+            const bumpedGasPriceBN = web3.utils.toBN(recommendedGasPrice).muln(110).divn(100);
+            const receipt = await methodCall.send({
+              from: account,
+              gas: finalGas,
+              gasPrice: bumpedGasPriceBN.toString()
+            });
+            console.log(`Finalized end for posId=${i} - Tx: ${receipt.transactionHash}`);
+            closeOracleIdToPosId[reportId] = i;
+            break;
+          }
+        }
+      } catch (err) {
+        console.error(`Error checking on-chain for reportId=${reportId}:`, err.message);
+      }
     }
   });
 }
