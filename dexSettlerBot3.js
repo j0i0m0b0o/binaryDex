@@ -2,9 +2,6 @@ const Web3 = require('web3');
 
 // ----- DEX ABI -----
 const contractAbi = [
-  // -------------------------------------------------
-  // Events we listen for
-  // -------------------------------------------------
   {
     "anonymous": false,
     "inputs": [
@@ -45,9 +42,7 @@ const contractAbi = [
     "type": "event"
   },
 
-  // -------------------------------------------------
-  // Functions we call
-  // -------------------------------------------------
+  // Functions
   {
     "constant": false,
     "inputs": [{ "name": "depositId", "type": "uint256" }],
@@ -84,8 +79,6 @@ const contractAbi = [
     "stateMutability": "nonpayable",
     "type": "function"
   },
-
-  // *** IMPORTANT: "endPosition(posId)"
   {
     "constant": false,
     "inputs": [{ "name": "posId", "type": "uint256" }],
@@ -96,9 +89,7 @@ const contractAbi = [
     "type": "function"
   },
 
-  // -------------------------------------------------
-  // Getter we use to read openOracleId/closeOracleId, etc
-  // -------------------------------------------------
+  // For reading positions, depositRequests, withdrawRequests, etc
   {
     "constant": true,
     "inputs": [{ "name": "", "type": "uint256" }],
@@ -123,9 +114,44 @@ const contractAbi = [
     "type": "function"
   },
 
-  // -------------------------------------------------
-  // Getter for nextPositionId (public variable in contract)
-  // -------------------------------------------------
+  // Additional getters for depositRequests / withdrawRequests
+  {
+    "constant": true,
+    "inputs": [{ "name": "", "type": "uint256" }],
+    "name": "depositRequests",
+    "outputs": [
+      { "name": "user",            "type": "address" },
+      { "name": "amountETH",       "type": "uint256" },
+      { "name": "settlerReward",   "type": "uint256" },
+      { "name": "requestTimestamp","type": "uint256" },
+      { "name": "waitTime",        "type": "uint256" },
+      { "name": "settled",         "type": "bool" },
+      { "name": "cancelled",       "type": "bool" },
+      { "name": "longestBetId",    "type": "uint256" }
+    ],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [{ "name": "", "type": "uint256" }],
+    "name": "withdrawRequests",
+    "outputs": [
+      { "name": "user",            "type": "address" },
+      { "name": "shares",          "type": "uint256" },
+      { "name": "settlerReward",   "type": "uint256" },
+      { "name": "requestTimestamp","type": "uint256" },
+      { "name": "waitTime",        "type": "uint256" },
+      { "name": "settled",         "type": "bool" },
+      { "name": "cancelled",       "type": "bool" },
+      { "name": "longestBetId",    "type": "uint256" }
+    ],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+
   {
     "constant": true,
     "inputs": [],
@@ -163,6 +189,11 @@ const oracleAddress   = '0x0dD4BE671009F039cEfc4a3AC25b68Ef2E40F111'; // Oracle
 
 // Basic config
 const delay = 1.5; // deposit/withdraw wait times
+
+// Store which deposits/withdrawals are blocked by posId
+const blockedDepositsByPosId   = {};
+const blockedWithdrawalsByPosId= {};
+
 let openOracleIdToPosId  = {};
 let closeOracleIdToPosId = {};
 
@@ -173,7 +204,7 @@ let contract;
 let oracleContract;
 let account;
 
-// -------------- SCHEDULING LOGIC -------------
+// -------------- SCHEDULING LOGIC for endPosition -------------
 async function scheduleEndPosition(web3Inst, contractInst, posId, user) {
   try {
     const EXTRA_DELAY_SEC = 4;
@@ -222,10 +253,10 @@ async function endPositionNow(contractInst, posId, user) {
     });
     console.log(`endPosition(${posId}) success - Tx: ${receipt.transactionHash}`);
 
-    // Read position data to get closeOracleId
+    // read positionData, set closeOracleId => closeOracleIdToPosId map
     const positionData = await contractInst.methods.positions(posId).call();
     const closeOracleId = positionData.closeOracleId;
-    if (closeOracleId && closeOracleId != '0') {
+    if (closeOracleId && closeOracleId !== '0') {
       closeOracleIdToPosId[closeOracleId] = posId;
       console.log(`Mapped closeOracleId ${closeOracleId} -> posId ${posId} after endPosition`);
     } else {
@@ -236,32 +267,70 @@ async function endPositionNow(contractInst, posId, user) {
   }
 }
 
+// -------------- Helper to schedule deposit settle -------------
+function scheduleSettleDepositor(depositId, waitTime) {
+  const baseDelay = parseInt(2,10) + delay;
+  const waitMs    = baseDelay * 1000;
+  console.log(`Scheduling deposit ${depositId} in ~${baseDelay}s...`);
+  setTimeout(async () => {
+    try {
+      const receipt = await sendTransactionDynamically(
+        contract.methods.settleDepositor(depositId)
+      );
+      console.log(`Settled deposit ${depositId} - Tx: ${receipt.transactionHash}`);
+    } catch (err) {
+      console.error(`Error settling deposit ${depositId}:`, err.message);
+    }
+  }, waitMs);
+}
+
+// -------------- Helper to schedule withdraw settle -------------
+function scheduleSettleWithdraw(withdrawId, waitTime) {
+  const baseDelay = parseInt(2, 10) + delay;
+  const waitMs    = baseDelay * 1000;
+  console.log(`Scheduling withdraw ${withdrawId} in ~${baseDelay}s...`);
+  setTimeout(async () => {
+    try {
+      const receipt = await sendTransactionDynamically(
+        contract.methods.settleWithdraw(withdrawId)
+      );
+      console.log(`Settled withdrawal ${withdrawId} - Tx: ${receipt.transactionHash}`);
+    } catch (err) {
+      console.error(`Error settling withdrawal ${withdrawId}:`, err.message);
+    }
+  }, waitMs);
+}
+
 // -------------- RECONNECT / INITIALIZE -------------
 function initializeWeb3() {
   console.log('Initializing Web3, attempt:', reconnectAttempt);
 
-  // Create a new websocket provider
-  const provider = new Web3.providers.WebsocketProvider(providerUrl, {
-    reconnect: {
-      auto: false // we'll handle it manually
+  // remove old listeners if any
+  if (web3 && web3.currentProvider) {
+    try {
+      web3.currentProvider.removeAllListeners();
+    } catch (e) {
+      console.error("Error removing old listeners:", e.message);
     }
+  }
+
+  // create new WS
+  const provider = new Web3.providers.WebsocketProvider(providerUrl, {
+    reconnect: { auto: false }
   });
   web3 = new Web3(provider);
 
-  // Add private key
   web3.eth.accounts.wallet.add(privateKey);
   account = web3.eth.accounts.wallet[0].address;
 
-  // Create contract instances
   contract       = new web3.eth.Contract(contractAbi, contractAddress);
   oracleContract = new web3.eth.Contract(oracleAbi, oracleAddress);
 
-  // Connection event handlers
   provider.on('connect', () => {
     reconnectAttempt = 0;
     console.log('WebSocket connected to Arbitrum');
   });
-  provider.on('error', err => {
+  provider.on('error', (err) => {
     console.error('WebSocket error:', err);
   });
   provider.on('end', () => {
@@ -273,7 +342,6 @@ function initializeWeb3() {
     attemptReconnect();
   });
 
-  // Start listening to events
   attachEventListeners();
 }
 
@@ -291,10 +359,8 @@ function attemptReconnect() {
 async function sendTransactionDynamically(methodCall) {
   const baseGas = await methodCall.estimateGas({ from: account });
   const finalGas = Math.floor(baseGas * 1.2);
-
   const recommendedGasPrice = await web3.eth.getGasPrice();
   const bumpedGasPriceBN    = web3.utils.toBN(recommendedGasPrice).muln(110).divn(100);
-
   return methodCall.send({
     from: account,
     gas: finalGas,
@@ -302,67 +368,76 @@ async function sendTransactionDynamically(methodCall) {
   });
 }
 
-// -------------- ATTACH EVENT LISTENERS -------------
+// -------------- EVENT LISTENERS -------------
 function attachEventListeners() {
+
   // newDeposit
-  contract.events.newDeposit({
-    fromBlock: 'latest',
-    includeRemoved: false
-  }, (error, event) => {
+  contract.events.newDeposit({ fromBlock: 'latest' }, async (error, event) => {
     if (error) {
       console.error('Error on newDeposit event:', error);
       return;
     }
     const { depositId, waitTimeDeposit } = event.returnValues;
-    const baseDelay = parseInt(waitTimeDeposit, 10) + delay;
-    const extraSec  = parseInt(waitTimeDeposit, 10) > 0 ? 1 : 0;
-    const waitMs    = (baseDelay + extraSec) * 1000;
+    console.log(`New deposit #${depositId}, newDeposit event fired.`);
 
-    console.log(`New deposit #${depositId}, scheduling settleDepositor in ~${baseDelay + extraSec}s`);
-    setTimeout(async () => {
-      try {
-        const receipt = await sendTransactionDynamically(
-          contract.methods.settleDepositor(depositId)
-        );
-        console.log(`Settled deposit ${depositId} - Tx: ${receipt.transactionHash}`);
-      } catch (err) {
-        console.error(`Error settling deposit ${depositId}:`, err.message);
+    // read depositRequests to see if blocked
+    try {
+      const d = await contract.methods.depositRequests(depositId).call();
+      const lPosId = d.longestBetId;  // lPosId is blocking pos
+      if (lPosId === "0") {
+        // no blocking pos => schedule normally
+        scheduleSettleDepositor(depositId, waitTimeDeposit);
+      } else {
+        // Check if the position is already finalized
+        const pos = await contract.methods.positions(lPosId).call();
+        if (parseInt(pos.state, 10) === 4) { // Assuming 4 is Closed
+          console.log(`Position ${lPosId} is already Closed, scheduling deposit ${depositId} immediately.`);
+          scheduleSettleDepositor(depositId, waitTimeDeposit);
+        } else {
+          console.log(`Deposit ${depositId} is blocked by posId=${lPosId} - waiting for finalizeEndPosition.`);
+          blockedDepositsByPosId[lPosId] = blockedDepositsByPosId[lPosId] || [];
+          blockedDepositsByPosId[lPosId].push({ depositId, waitTime: waitTimeDeposit });
+        }
       }
-    }, waitMs);
+    } catch (err2) {
+      console.error(`Could not read depositRequests(${depositId}):`, err2.message);
+    }
   });
 
   // newWithdrawal
-  contract.events.newWithdrawal({
-    fromBlock: 'latest',
-    includeRemoved: false
-  }, (error, event) => {
+  contract.events.newWithdrawal({ fromBlock: 'latest' }, async (error, event) => {
     if (error) {
       console.error('Error on newWithdrawal event:', error);
       return;
     }
     const { withdrawId, waitTimeWithdraw } = event.returnValues;
-    const baseDelay = parseInt(waitTimeWithdraw, 10) + delay;
-    const extraSec  = parseInt(waitTimeWithdraw, 10) > 0 ? 1 : 0;
-    const waitMs    = (baseDelay + extraSec) * 1000;
+    console.log(`New withdrawal #${withdrawId}, newWithdrawal event fired.`);
 
-    console.log(`New withdrawal #${withdrawId}, scheduling settleWithdraw in ~${baseDelay + extraSec}s`);
-    setTimeout(async () => {
-      try {
-        const receipt = await sendTransactionDynamically(
-          contract.methods.settleWithdraw(withdrawId)
-        );
-        console.log(`Settled withdrawal ${withdrawId} - Tx: ${receipt.transactionHash}`);
-      } catch (err) {
-        console.error(`Error settling withdrawal ${withdrawId}:`, err.message);
+    // read withdrawRequests to see if blocked
+    try {
+      const w = await contract.methods.withdrawRequests(withdrawId).call();
+      const lPosId = w.longestBetId;
+      if (lPosId === "0") {
+        scheduleSettleWithdraw(withdrawId, waitTimeWithdraw);
+      } else {
+        // Check if the position is already finalized
+        const pos = await contract.methods.positions(lPosId).call();
+        if (parseInt(pos.state, 10) === 4) { // Assuming 4 is Closed
+          console.log(`Position ${lPosId} is already Closed, scheduling withdrawal ${withdrawId} immediately.`);
+          scheduleSettleWithdraw(withdrawId, waitTimeWithdraw);
+        } else {
+          console.log(`Withdrawal ${withdrawId} is blocked by posId=${lPosId} - waiting for finalizeEndPosition.`);
+          blockedWithdrawalsByPosId[lPosId] = blockedWithdrawalsByPosId[lPosId] || [];
+          blockedWithdrawalsByPosId[lPosId].push({ withdrawId, waitTime: waitTimeWithdraw });
+        }
       }
-    }, waitMs);
+    } catch (err2) {
+      console.error(`Could not read withdrawRequests(${withdrawId}):`, err2.message);
+    }
   });
 
   // positionOpenRequest
-  contract.events.positionOpenRequest({
-    fromBlock: 'latest',
-    includeRemoved: false
-  }, async (error, event) => {
+  contract.events.positionOpenRequest({ fromBlock: 'latest' }, async (error, event) => {
     if (error) {
       console.error('Error on positionOpenRequest event:', error);
       return;
@@ -380,10 +455,7 @@ function attachEventListeners() {
   });
 
   // endPositionStarted
-  contract.events.endPositionStarted({
-    fromBlock: 'latest',
-    includeRemoved: false
-  }, async (error, event) => {
+  contract.events.endPositionStarted({ fromBlock: 'latest' }, async (error, event) => {
     if (error) {
       console.error('Error on endPositionStarted event:', error);
       return;
@@ -401,10 +473,7 @@ function attachEventListeners() {
   });
 
   // Oracle: ReportSettled
-  oracleContract.events.ReportSettled({
-    fromBlock: 'latest',
-    includeRemoved: false
-  }, async (error, event) => {
+  oracleContract.events.ReportSettled({ fromBlock: 'latest' }, async (error, event) => {
     if (error) {
       console.error('Error on ReportSettled event:', error);
       return;
@@ -420,7 +489,6 @@ function attachEventListeners() {
         const methodCall = contract.methods.settleOpen(posId);
         const baseGas    = await methodCall.estimateGas({ from: account });
         const finalGas   = Math.floor(baseGas * 1.2);
-
         const recommendedGasPrice = await web3.eth.getGasPrice();
         const bumpedGasPriceBN    = web3.utils.toBN(recommendedGasPrice).muln(110).divn(100);
 
@@ -445,7 +513,6 @@ function attachEventListeners() {
         const methodCall = contract.methods.finalizeEndPosition(posId);
         const baseGas    = await methodCall.estimateGas({ from: account });
         const finalGas   = Math.floor(baseGas * 1.2);
-
         const recommendedGasPrice = await web3.eth.getGasPrice();
         const bumpedGasPriceBN    = web3.utils.toBN(recommendedGasPrice).muln(110).divn(100);
 
@@ -455,6 +522,23 @@ function attachEventListeners() {
           gasPrice: bumpedGasPriceBN.toString()
         });
         console.log(`Finalized end for posId=${posId} - Tx: ${receipt.transactionHash}`);
+
+        // If deposits or withdrawals were blocked by this posId, schedule them now:
+        if (blockedDepositsByPosId[posId]) {
+          console.log(`Unblocking ${blockedDepositsByPosId[posId].length} deposit(s) for posId=${posId}.`);
+          for (const dObj of blockedDepositsByPosId[posId]) {
+            scheduleSettleDepositor(dObj.depositId, dObj.waitTime);
+          }
+          delete blockedDepositsByPosId[posId];
+        }
+        if (blockedWithdrawalsByPosId[posId]) {
+          console.log(`Unblocking ${blockedWithdrawalsByPosId[posId].length} withdraw(s) for posId=${posId}.`);
+          for (const wObj of blockedWithdrawalsByPosId[posId]) {
+            scheduleSettleWithdraw(wObj.withdrawId, wObj.waitTime);
+          }
+          delete blockedWithdrawalsByPosId[posId];
+        }
+
         delete closeOracleIdToPosId[reportId];
       } catch (err) {
         console.error(`Error in finalizeEndPosition(${posId}):`, err.message);
@@ -478,6 +562,23 @@ function attachEventListeners() {
               gasPrice: bumpedGasPriceBN.toString()
             });
             console.log(`Finalized end for posId=${i} - Tx: ${receipt.transactionHash}`);
+
+            // unblocking if needed
+            if (blockedDepositsByPosId[i]) {
+              console.log(`Unblocking ${blockedDepositsByPosId[i].length} deposit(s) for posId=${i}.`);
+              for (const dObj of blockedDepositsByPosId[i]) {
+                scheduleSettleDepositor(dObj.depositId, dObj.waitTime);
+              }
+              delete blockedDepositsByPosId[i];
+            }
+            if (blockedWithdrawalsByPosId[i]) {
+              console.log(`Unblocking ${blockedWithdrawalsByPosId[i].length} withdraw(s) for posId=${i}.`);
+              for (const wObj of blockedWithdrawalsByPosId[i]) {
+                scheduleSettleWithdraw(wObj.withdrawId, wObj.waitTime);
+              }
+              delete blockedWithdrawalsByPosId[i];
+            }
+
             closeOracleIdToPosId[reportId] = i;
             break;
           }
@@ -494,24 +595,21 @@ async function main() {
   initializeWeb3();
   console.log('Settler bot started, listening for events on Arbitrum...');
 
-  // Additional keepAlive / liveness check
+  // KeepAlive / liveness
   setInterval(async () => {
     if (!web3) return;
     try {
       await web3.eth.getBlockNumber();
-      // If successful, we know the connection is up
     } catch (err) {
       console.error('Keep-alive check failed:', err);
-      // No direct crash => next time the provider 'end' event will do reconnection
     }
   }, 30000);
 
-  // Keep the process alive
+  // Prevent exit
   setInterval(() => {
     // no-op
   }, 60000);
 
-  // Handle uncaught rejections
   process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
   });
