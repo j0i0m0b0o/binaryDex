@@ -381,10 +381,14 @@
                 Entry Price:
                 <span id="entryPrice" class="default">N/A</span>
               </p>
-              <!-- Minimal addition: countdown to bet end -->
               <p>
                 Time left:
                 <span id="timeLeft" class="default">0m 0s</span>
+              </p>
+              <!-- NEW: Live Update line -->
+              <p>
+                Position Status:
+                <span id="posLiveUpdate" class="default">No events yet</span>
               </p>
             </div>
           </div>
@@ -502,11 +506,21 @@
     let provider;
     let signer;
     let dexContract;
+    let currentPositionId = null; // Added to track the current position ID
 
     // We store these to compute max bet
     let poolSizeGlobal = 0;
     let totalLongOIGlobal = 0;
     let totalShortOIGlobal = 0;
+
+    // If you have your Oracle address, set it here:
+    const ORACLE_ADDRESS = "0xYourOracleAddressHere"; // replace with actual
+    // Minimal ABI for Oracle events:
+    const ORACLE_ABI = [
+      "event ReportInstanceCreated(uint256 indexed reportId, address indexed token1Address, address indexed token2Address, uint256 feePercentage, uint256 multiplier, uint256 exactToken1Report, uint256 ethFee, address creator, uint256 settlementTime)",
+      "event InitialReportSubmitted(uint256 indexed reportId, address reporter, uint256 amount1, uint256 amount2, address indexed token1Address, address indexed token2Address)",
+      "event ReportSettled(uint256 indexed reportId, uint256 price, uint256 settlementTimestamp)"
+    ];
 
     const DEX_ABI = [
       "function deposit(uint256) payable",
@@ -518,11 +532,30 @@
       "function totalLongOI() view returns (uint256)",
       "function totalShortOI() view returns (uint256)",
       "event positionOpenRequest(uint256 settlerRewardOpen, uint256 positionId)",
+      "event openSettled(uint256 posId)",
+      "event endPositionStarted(uint256 posId)",
+      "event endPositionFinalized(uint256 posId)",
       "function positions(uint256) view returns (address, bool, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint8)",
       "function traderToPosId(address) view returns (uint256)"
     ];
 
     const SETTINGS_KEY = "dexAppSettings";
+
+    // Minimal addition: function to bump gas by ~20%
+    async function getGasOverrides() {
+      try {
+        const feeData = await provider.getFeeData();
+        if (!feeData.maxFeePerGas || !feeData.maxPriorityFeePerGas) {
+          return {};
+        }
+        return {
+          maxFeePerGas: feeData.maxFeePerGas.mul(120).div(100),
+          maxPriorityFeePerGas: feeData.maxPriorityFeePerGas.mul(120).div(100)
+        };
+      } catch (err) {
+        return {};
+      }
+    }
 
     function logDebug(msg) {
       console.log(msg);
@@ -537,7 +570,7 @@
         const defaults = {
           privateKey: "",
           rpcEndpoint: "https://arb1.arbitrum.io/rpc",
-          contractAddress: "0x3dBeaD4113ef6BeC532a3cB9A3Ca692Ba9239B3C",
+          contractAddress: "0xEf137976291D43CB8581162B3C22FeE8075Cda5d",
           disableTrades: false,
           disablePool: false,
           settlerReward: "0.000018",
@@ -690,17 +723,35 @@
       }
       try {
         const traderAddress = await signer.getAddress();
-        const positionId = await dexContract.traderToPosId(traderAddress);
-        if (positionId.eq(0)) {
+        let positionId;
+        if (currentPositionId) {
+          positionId = currentPositionId;
+        } else {
+          const posIdBN = await dexContract.traderToPosId(traderAddress);
+          if (posIdBN.eq(0)) {
+            document.getElementById("positionDirection").innerText = "N/A";
+            document.getElementById("positionSize").innerText = "0";
+            document.getElementById("entryPrice").innerText = "N/A";
+            document.getElementById("timeLeft").innerText = "0m 0s";
+            document.getElementById("posLiveUpdate").innerText = "No events yet";
+            if (countdownTimer) clearInterval(countdownTimer);
+            return;
+          }
+          positionId = posIdBN.toString();
+        }
+        const positionData = await dexContract.positions(positionId);
+        const state = positionData[12]; // assuming state is at index 12
+        if (state === 4) { // Closed
+          currentPositionId = null;
           document.getElementById("positionDirection").innerText = "N/A";
           document.getElementById("positionSize").innerText = "0";
           document.getElementById("entryPrice").innerText = "N/A";
           document.getElementById("timeLeft").innerText = "0m 0s";
+          document.getElementById("posLiveUpdate").innerText = "Position closed";
           if (countdownTimer) clearInterval(countdownTimer);
-          logDebug("No active position found for trader.");
           return;
         }
-        const positionData = await dexContract.positions(positionId);
+        // Set position details
         const direction = positionData[1] ? "Long" : "Short";
         const sizeETH = parseFloat(ethers.utils.formatEther(positionData[2]));
         const sizeDisplay = sizeETH < 1 ? sizeETH.toFixed(4) : sizeETH.toFixed(2);
@@ -736,20 +787,31 @@
               document.getElementById("timeLeft").innerText = `${minutes}m ${seconds}s`;
             }
           }, 1000);
+        } else {
+          document.getElementById("timeLeft").innerText = "N/A";
         }
 
-        logDebug(`Position: ID=${positionId}, Dir=${direction}, Size=${sizeDisplay}, Entry=${formattedEntryPrice}`);
+        // Set posLiveUpdate based on state
+        if (state === 1) { // WaitingOpenOracle
+          document.getElementById("posLiveUpdate").innerText = "Waiting for open settlement";
+        } else if (state === 2) { // Active
+          document.getElementById("posLiveUpdate").innerText = "Position is active";
+        } else if (state === 3) { // WaitingCloseOracle
+          document.getElementById("posLiveUpdate").innerText = "Waiting for close settlement";
+        }
+
+        logDebug(`Position: ID=${positionId}, State=${state}, Dir=${direction}, Size=${sizeDisplay}, Entry=${formattedEntryPrice}`);
       } catch (err) {
         logDebug("Error refreshPosition => " + (err.message || err));
         document.getElementById("positionDirection").innerText = "N/A";
         document.getElementById("positionSize").innerText = "0";
         document.getElementById("entryPrice").innerText = "N/A";
         document.getElementById("timeLeft").innerText = "0m 0s";
+        document.getElementById("posLiveUpdate").innerText = "No events yet";
       }
     }
 
-    // Our existing open/close pool or position handlers remain the same
-    async function doDeposit() { /* unchanged below... */ 
+    async function doDeposit() {
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -789,7 +851,8 @@
         }
 
         logDebug(`doDeposit => deposit(${settlerReward}), value=${depositETH}`);
-        const tx = await dexContract.deposit(rewardVal, { value: depositValue });
+        const gasOverrides = await getGasOverrides(); // Gas override
+        const tx = await dexContract.deposit(rewardVal, { ...gasOverrides, value: depositValue });
         await tx.wait();
         alert("Deposit requested (settle required).");
         await refreshPoolStats();
@@ -800,7 +863,6 @@
     }
 
     async function doWithdrawAll() {
-      /* unchanged... */
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -824,7 +886,8 @@
         }
 
         logDebug(`withdrawAll => shares=${userShares.toString()}, reward=${settlerReward}`);
-        const tx = await dexContract.withdraw(userShares, { value: rewardVal });
+        const gasOverrides = await getGasOverrides(); // Gas override
+        const tx = await dexContract.withdraw(userShares, { ...gasOverrides, value: rewardVal });
         await tx.wait();
         alert("Withdraw All requested (settle required).");
         await refreshPoolStats();
@@ -835,7 +898,6 @@
     }
 
     async function doPartialWithdraw() {
-      /* unchanged... */
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -857,35 +919,33 @@
         const settlerReward = data.settlerReward || "0.000018";
         const rewardVal = ethers.utils.parseEther(settlerReward);
 
-        const [poolETH, poolShares] = await Promise.all([
+        const [poolETHBN, poolSharesBN] = await Promise.all([
           dexContract.totalPoolETH(),
           dexContract.totalPoolShares()
         ]);
 
-        const poolETHFloat = parseFloat(ethers.utils.formatEther(poolETH));
-        const poolSharesFloat = parseFloat(poolShares.toString());
-        if (poolETHFloat <= 0 || poolSharesFloat <= 0) {
+        if (poolETHBN.eq(0) || poolSharesBN.eq(0)) {
           alert("Pool is empty or not ready.");
           return;
         }
-        const desiredETHFloat = parseFloat(ethAmount);
-        const sharesNeededFloat = (desiredETHFloat / poolETHFloat) * poolSharesFloat;
+
+        const desiredETHBN = ethers.utils.parseEther(ethAmount);
+        const sharesNeededBN = poolSharesBN.mul(desiredETHBN).div(poolETHBN);
 
         const userAddr = await signer.getAddress();
         const userSharesBN = await dexContract.sharesOf(userAddr);
-        const userSharesFloat = parseFloat(userSharesBN.toString());
 
-        if (sharesNeededFloat > userSharesFloat) {
+        if (sharesNeededBN.gt(userSharesBN)) {
           alert("Not enough shares for that ETH amount.");
           return;
         }
-        const finalShares = Math.floor(sharesNeededFloat);
-        if (finalShares < 1) {
+        if (sharesNeededBN.eq(0)) {
           alert("Too small to withdraw that fraction of ETH.");
           return;
         }
-        logDebug(`partialWithdraw => finalShares=${finalShares}, reward=${settlerReward}`);
-        const tx = await dexContract.withdraw(finalShares, { value: rewardVal });
+        logDebug(`partialWithdraw => finalShares=${sharesNeededBN}, reward=${settlerReward}`);
+        const gasOverrides = await getGasOverrides(); // Gas override
+        const tx = await dexContract.withdraw(sharesNeededBN, { ...gasOverrides, value: rewardVal });
         await tx.wait();
         alert("Partial withdraw requested (settle required).");
         await refreshPoolStats();
@@ -896,7 +956,6 @@
     }
 
     async function doOpenPosition() {
-      /* unchanged... */
       if (!(await isContractReady())) {
         alert("Contract not initialized. Check your settings.");
         return;
@@ -942,6 +1001,7 @@
         logDebug(
           `openPosition => dir=${directionBool}, sizeEth=${sizeEth}, totalVal=${totalVal.toString()}`
         );
+        const gasOverrides = await getGasOverrides(); // Gas override
         const tx = await dexContract.openPosition(
           directionBool,
           openR,
@@ -949,7 +1009,7 @@
           fee,
           closeR2,
           betTimeSeconds,
-          { value: totalVal }
+          { ...gasOverrides, value: totalVal }
         );
         const receipt = await tx.wait();
         const iface = dexContract.interface;
@@ -962,12 +1022,12 @@
           }
         });
         if (event) {
-          const positionId = event.args.positionId.toString();
-          logDebug(`Position opened, ID: ${positionId}`);
+          currentPositionId = event.args.positionId.toString();
+          logDebug(`Position ID set: ${currentPositionId}`);
         } else {
           logDebug("No positionOpenRequest event found.");
         }
-        alert("Open position requested. Must call 'settleOpen()' later!");
+        // Removed the alert
       } catch (err) {
         logDebug("OpenPosition failed => " + (err.message || err));
         alert("Open Position failed: " + (err.message || err));
@@ -992,7 +1052,6 @@
       });
     }
 
-    // Show "Max X ETH" factoring totalLongOI or totalShortOI
     function updateMaxBetDisplay() {
       if (!poolSizeGlobal) {
         document.getElementById("maxBetSpan").innerText = "";
@@ -1007,8 +1066,6 @@
         }
       }
 
-      // formula => if long => maxBet = (poolSizeGlobal/10 - totalLongOIGlobal)
-      // if short => maxBet = (poolSizeGlobal/10 - totalShortOIGlobal)
       let raw;
       if (isLong) {
         raw = (poolSizeGlobal / 10) - totalLongOIGlobal;
@@ -1020,7 +1077,6 @@
       document.getElementById("maxBetSpan").innerText = `(Max ${maxVal} ETH)`;
     }
 
-    // Potential Profit & "Total incl. Fees" logic
     function updateProfitDisplay() {
       updateMaxBetDisplay(); // ensure "Max X ETH" is fresh
 
@@ -1092,7 +1148,9 @@
       if (!confirmTx) return;
 
       try {
+        const gasOverrides = await getGasOverrides(); // Gas override
         const tx = await signer.sendTransaction({
+          ...gasOverrides,
           to: recipient,
           value: ethers.utils.parseEther(amount),
         });
@@ -1104,10 +1162,74 @@
       }
     }
 
+    // Minimal additions for WS events to update "posLiveUpdate"
+    let oracleWsContract, dexWsContract;
+
+    function initWebsocketListeners() {
+      const data = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      let eventProvider;
+      if (data.rpcEndpoint && data.rpcEndpoint.startsWith("wss")) {
+        try {
+          eventProvider = new ethers.providers.WebSocketProvider(data.rpcEndpoint);
+        } catch (err) {
+          logDebug("Failed to create WebSocketProvider: " + err.message);
+          eventProvider = provider;
+        }
+      } else if (provider) {
+        eventProvider = provider;
+      } else {
+        logDebug("No provider available for event listening");
+        return;
+      }
+      // Set up dexWsContract with eventProvider
+      dexWsContract = new ethers.Contract(
+        data.contractAddress,
+        DEX_ABI,
+        eventProvider
+      );
+      // If oracle address is set, set up oracleWsContract
+      if (ORACLE_ADDRESS !== "0xYourOracleAddressHere") {
+        oracleWsContract = new ethers.Contract(
+          ORACLE_ADDRESS,
+          ORACLE_ABI,
+          eventProvider
+        );
+        // Set up oracle listeners
+        oracleWsContract.on("ReportInstanceCreated", (reportId, token1, token2, feePct, mult, exact, ethFee, creator, settTime) => {
+          document.getElementById("posLiveUpdate").innerText = "Price requested (Oracle).";
+        });
+        oracleWsContract.on("InitialReportSubmitted", (reportId, reporter, amount1, amount2, t1, t2) => {
+          document.getElementById("posLiveUpdate").innerText = "Price reported. Waiting for oracle settlement...";
+        });
+        oracleWsContract.on("ReportSettled", (reportId, price, settlementTimestamp) => {
+          document.getElementById("posLiveUpdate").innerText = "Oracle settled. Waiting for position settle...";
+        });
+      }
+      // Set up dex listeners
+      dexWsContract.on("positionOpenRequest", (settlerRewardOpen, positionId) => {
+        document.getElementById("posLiveUpdate").innerText = "Position open request event => Price requested.";
+      });
+      dexWsContract.on("openSettled", (posId) => {
+        document.getElementById("posLiveUpdate").innerText = "Open settled => Position is active now.";
+      });
+      dexWsContract.on("endPositionStarted", (posId) => {
+        document.getElementById("posLiveUpdate").innerText = "End position started => in final stage.";
+      });
+      dexWsContract.on("endPositionFinalized", (posId) => {
+        document.getElementById("posLiveUpdate").innerText = "Position settled. (Done)";
+        if (currentPositionId === posId.toString()) {
+          currentPositionId = null;
+        }
+      });
+    }
+
     document.addEventListener("DOMContentLoaded", async () => {
       loadSettingsFromLocalStorage();
       await initEthers();
       loadTradingWidget(); // Load chart once
+
+      // Start WS listeners
+      initWebsocketListeners();
 
       // Refresh stats
       await refreshEthBalance();
