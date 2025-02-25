@@ -3,7 +3,6 @@ pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-
 interface IOpenOracle {
     function createReportInstance(
         address token1Address,
@@ -65,7 +64,8 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
     // Prevent overlapping requests for the same user
     mapping(address => bool) public activeRequest;
     mapping(address => bool) public activeTradeRequest;
-    
+    mapping(address => bool) public activeTrade;
+
     mapping(address => uint256) public traderToPosId;
 
     enum PositionState { None, WaitingOpenOracle, Active, WaitingCloseOracle, Closed }
@@ -90,8 +90,10 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
 
     struct Position2 {
         uint256 betTimespan;
-        bool refunded;
+        bool refunded; //open refunded or not
         bool closed;
+
+        bool endRefunded; //end refunded or not
     }
 
     uint256 public nextPositionId = 1;
@@ -300,8 +302,9 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
         uint256 settlerRewardClose2,
         uint256 betTime
     ) external payable nonReentrant {
-        require(!activeTradeRequest[msg.sender], "User has active trade");
+        require(!activeTradeRequest[msg.sender], "User has active trade request");
         require(betTime <= MAX_BET_TIME && betTime >= MIN_BET_TIME, "Invalid bet time");
+        require(!activeTrade[msg.sender], "User has active trade");
 
         uint256 totalFees = settlerRewardOpen 
                             + settlerRewardClose 
@@ -356,7 +359,8 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
         positions2[posId] = Position2({
             betTimespan: betTime,
             refunded: false,
-            closed: false
+            closed: false,
+            endRefunded: false
         });
 
         emit positionOpenRequest(settlerRewardOpen, posId);
@@ -389,8 +393,11 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
         emit openSettled(posId);
         activeTradeRequest[p.trader] = false;
         numActiveTrades += 1;
-        (bool s, ) = payable(msg.sender).call{value: p.settlerRewardOpen}("");
         traderToPosId[p.trader] = posId;
+        activeTrade[p.trader] = true;
+
+        (bool s, ) = payable(msg.sender).call{value: p.settlerRewardOpen}("");
+
         require(s, "SettlerRewardOpen fail");
     }
 
@@ -463,6 +470,7 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
     function _finalizeEndPositionLogic(uint256 posId) internal {
         Position storage p = positions[posId];
         Position2 storage q = positions2[posId];
+        require(!q.endRefunded, "Already refunded");
 
         require(p.state == PositionState.WaitingCloseOracle, "Not waitingCloseOracle");
 
@@ -502,6 +510,35 @@ contract SimpleBinaryBetDEX is ReentrancyGuard {
         p.state = PositionState.Closed;
         q.closed = true;
         traderToPosId[p.trader] = 0;
+        activeTrade[p.trader] = false;
+    }
+
+    function refundEndFailure(uint256 posId) external nonReentrant {
+        Position storage p = positions[posId];
+        Position2 storage q = positions2[posId];
+
+        require(!q.endRefunded, "Already refunded");
+        require(p.state == PositionState.WaitingCloseOracle, "Position not waitingCloseOracle");
+        require(block.timestamp > (p.stateChangeTimestamp + 900), "Not timed out yet");
+
+        if (p.direction) {
+            totalLongOI -= p.sizeETH;
+        } else {
+            totalShortOI -= p.sizeETH;
+        }
+
+        uint256 refundAmount = p.sizeETH 
+                             + p.settlerRewardClose2;
+
+        q.endRefunded = true;
+        p.state = PositionState.Closed;
+        q.closed = true;
+        traderToPosId[p.trader] = 0;
+        activeTrade[p.trader] = false;
+
+        (bool s, ) = payable(p.trader).call{value: refundAmount}("");
+        require(s, "Refund fail");
+
     }
 
     receive() external payable {}
